@@ -24,8 +24,10 @@ import run.halo.app.model.dto.TagDTO;
 import run.halo.app.model.dto.post.BasePostDetailDTO;
 import run.halo.app.model.entity.*;
 import run.halo.app.model.enums.LogType;
+import run.halo.app.model.enums.PostPermalinkType;
 import run.halo.app.model.enums.PostStatus;
 import run.halo.app.model.params.PostQuery;
+import run.halo.app.model.properties.PermalinkProperties;
 import run.halo.app.model.vo.ArchiveMonthVO;
 import run.halo.app.model.vo.ArchiveYearVO;
 import run.halo.app.model.vo.PostDetailVO;
@@ -51,6 +53,7 @@ import static org.springframework.data.domain.Sort.Direction.DESC;
  * @author johnniang
  * @author ryanwang
  * @author guqing
+ * @author evanwang
  * @date 2019-03-14
  */
 @Slf4j
@@ -73,6 +76,8 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
 
     private final PostMetaService postMetaService;
 
+    private final OptionService optionService;
+
     public PostServiceImpl(PostRepository postRepository,
                            TagService tagService,
                            CategoryService categoryService,
@@ -80,8 +85,8 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
                            PostCategoryService postCategoryService,
                            PostCommentService postCommentService,
                            ApplicationEventPublisher eventPublisher,
-                           OptionService optionService,
-                           PostMetaService postMetaService) {
+                           PostMetaService postMetaService,
+                           OptionService optionService) {
         super(postRepository, optionService);
         this.postRepository = postRepository;
         this.tagService = tagService;
@@ -91,6 +96,7 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         this.postCommentService = postCommentService;
         this.eventPublisher = eventPublisher;
         this.postMetaService = postMetaService;
+        this.optionService = optionService;
     }
 
     @Override
@@ -156,8 +162,6 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
     public Post getBy(PostStatus status, String url) {
         Post post = super.getBy(status, url);
 
-        fireVisitEvent(post.getId());
-
         return post;
     }
 
@@ -172,8 +176,6 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
     @Override
     public Post getByUrl(String url) {
         Post post = super.getByUrl(url);
-
-        fireVisitEvent(post.getId());
 
         return post;
     }
@@ -246,9 +248,6 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
     @Override
     public PostDetailVO importMarkdown(String markdown, String filename) {
         Assert.notNull(markdown, "Markdown document must not be null");
-
-        // Render markdown to html document.
-        String content = MarkdownUtils.renderHtml(markdown);
 
         // Gets frontMatter
         Map<String, List<String>> frontMatter = MarkdownUtils.getFrontMatter(markdown);
@@ -451,6 +450,14 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         // Get post meta list map
         Map<Integer, List<PostMeta>> postMetaListMap = postMetaService.listPostMetaAsMap(postIds);
 
+        String blogUrl = optionService.getBlogBaseUrl();
+
+        PostPermalinkType permalinkType = optionService.getPostPermalinkType();
+
+        String pathSuffix = optionService.getByPropertyOrDefault(PermalinkProperties.PATH_SUFFIX, String.class, "");
+
+        String archivesPrefix = optionService.getByPropertyOrDefault(PermalinkProperties.ARCHIVES_PREFIX, String.class, "");
+
         return postPage.map(post -> {
             PostListVO postListVO = new PostListVO().convertFrom(post);
 
@@ -486,6 +493,20 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
 
             // Set comment count
             postListVO.setCommentCount(commentCountMap.getOrDefault(post.getId(), 0L));
+
+            StringBuilder fullPath = new StringBuilder(blogUrl);
+            if (permalinkType.equals(PostPermalinkType.DEFAULT)) {
+                fullPath.append("/")
+                        .append(archivesPrefix)
+                        .append("/")
+                        .append(postListVO.getUrl())
+                        .append(pathSuffix);
+            } else if (permalinkType.equals(PostPermalinkType.ID)) {
+                fullPath.append("/?p=")
+                        .append(postListVO.getId());
+            }
+
+            postListVO.setFullPath(fullPath.toString());
 
             return postListVO;
         });
@@ -546,6 +567,9 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         // Get post meta ids
         postDetailVO.setPostMetaIds(postMetaIds);
         postDetailVO.setPostMetas(postMetaService.convertTo(postMetaList));
+
+        postDetailVO.setCommentCount(postCommentService.countByPostId(post.getId()));
+
         return postDetailVO;
     }
 
@@ -625,7 +649,8 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         return convertTo(post, tags, categories, postMetaList);
     }
 
-    private void fireVisitEvent(@NonNull Integer postId) {
+    @Override
+    public void publishVisitEvent(Integer postId) {
         eventPublisher.publishEvent(new PostVisitEvent(this, postId));
     }
 }
